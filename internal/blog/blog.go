@@ -1,13 +1,26 @@
 package blog
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
+)
+
+const (
+	ClaudeTimeout      = 10 * time.Minute // Claude CLI timeout
+	MaxTranscriptSize  = 500000           // ~500KB max transcript to send to Claude
 )
 
 // ConvertToBlog converts a transcript into a blog post using Claude CLI
 func ConvertToBlog(transcript string, styleGuidePath string) (string, error) {
+	// Validate transcript size
+	if len(transcript) > MaxTranscriptSize {
+		return "", fmt.Errorf("transcript too large: %d bytes (max: %d bytes)", len(transcript), MaxTranscriptSize)
+	}
+
 	// Load style guide
 	styleGuide, err := loadStyleGuide(styleGuidePath)
 	if err != nil {
@@ -19,19 +32,36 @@ func ConvertToBlog(transcript string, styleGuidePath string) (string, error) {
 
 	fmt.Println("Generating blog post with Claude CLI...")
 
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), ClaudeTimeout)
+	defer cancel()
+
 	// Execute claude CLI with the prompt
-	cmd := exec.Command("claude", "-p", prompt)
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt)
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("claude CLI timed out after %v", ClaudeTimeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("claude CLI error: %w\nstderr: %s", err, string(exitErr.Stderr))
 		}
 		return "", fmt.Errorf("claude CLI error: %w", err)
 	}
 
-	return string(output), nil
+	// Validate output is non-empty
+	result := strings.TrimSpace(string(output))
+	if result == "" {
+		return "", fmt.Errorf("claude CLI returned empty output")
+	}
+
+	return result, nil
 }
 
+// LoadStyleGuide loads a style guide from the given path.
+// If path is empty, returns the default style guide.
+// If path is the default "style_guide.md" and doesn't exist, uses default silently.
+// If path is explicitly specified and doesn't exist, returns an error.
 func loadStyleGuide(path string) (string, error) {
 	if path == "" {
 		return getDefaultStyleGuide(), nil
@@ -40,8 +70,11 @@ func loadStyleGuide(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("Style guide not found at %s, using default\n", path)
-			return getDefaultStyleGuide(), nil
+			// Only silently fallback for the default style_guide.md
+			if path == "style_guide.md" {
+				return getDefaultStyleGuide(), nil
+			}
+			return "", fmt.Errorf("style guide not found: %s", path)
 		}
 		return "", fmt.Errorf("failed to read style guide: %w", err)
 	}

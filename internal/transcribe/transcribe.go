@@ -1,11 +1,25 @@
 package transcribe
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+)
+
+// ValidModels is the list of valid whisper model sizes
+var ValidModels = map[string]bool{
+	"tiny": true, "base": true, "small": true, "medium": true, "large": true,
+}
+
+// Default timeouts for external commands
+const (
+	FFmpegTimeout  = 30 * time.Minute  // Audio extraction timeout
+	WhisperTimeout = 60 * time.Minute  // Transcription timeout (can be slow for large files)
+	MaxVideoSize   = 10 * 1024 * 1024 * 1024 // 10GB max video size
 )
 
 // ModelPath returns the expected path for a whisper model
@@ -53,13 +67,21 @@ func findWhisperCLI() (string, error) {
 }
 
 // extractAudio extracts audio from video file using ffmpeg
-func extractAudio(videoPath string) (string, error) {
-	// Create temp file for audio
-	tempDir := os.TempDir()
-	audioPath := filepath.Join(tempDir, "video-journal-audio.wav")
+func extractAudio(ctx context.Context, videoPath string) (string, func(), error) {
+	// Create unique temp file for audio
+	audioFile, err := os.CreateTemp("", "video-journal-audio-*.wav")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp audio file: %w", err)
+	}
+	audioPath := audioFile.Name()
+	audioFile.Close() // Close so ffmpeg can write to it
+
+	cleanup := func() {
+		os.Remove(audioPath)
+	}
 
 	// Use ffmpeg to extract audio as 16kHz mono WAV (required by whisper)
-	cmd := exec.Command("ffmpeg", "-y",
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-y",
 		"-i", videoPath,
 		"-ar", "16000",
 		"-ac", "1",
@@ -69,17 +91,28 @@ func extractAudio(videoPath string) (string, error) {
 	cmd.Stderr = nil // Suppress ffmpeg output
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("ffmpeg audio extraction failed: %w\nMake sure ffmpeg is installed", err)
+		cleanup()
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", nil, fmt.Errorf("ffmpeg audio extraction timed out after %v", FFmpegTimeout)
+		}
+		return "", nil, fmt.Errorf("ffmpeg audio extraction failed: %w\nMake sure ffmpeg is installed", err)
 	}
 
-	return audioPath, nil
+	return audioPath, cleanup, nil
 }
 
 // TranscribeVideo transcribes a video file using whisper.cpp CLI
 func TranscribeVideo(videoPath string, modelSize string) (string, error) {
-	// Check video file exists
-	if _, err := os.Stat(videoPath); os.IsNotExist(err) {
+	// Check video file exists and validate size
+	info, err := os.Stat(videoPath)
+	if os.IsNotExist(err) {
 		return "", fmt.Errorf("video file not found: %s", videoPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("cannot access video file: %w", err)
+	}
+	if info.Size() > MaxVideoSize {
+		return "", fmt.Errorf("video file too large: %d bytes (max: %d bytes)", info.Size(), MaxVideoSize)
 	}
 
 	// Ensure model is available
@@ -93,22 +126,45 @@ func TranscribeVideo(videoPath string, modelSize string) (string, error) {
 		return "", err
 	}
 
+	// Create context with timeout for ffmpeg
+	ffmpegCtx, ffmpegCancel := context.WithTimeout(context.Background(), FFmpegTimeout)
+	defer ffmpegCancel()
+
 	fmt.Println("Extracting audio from video...")
-	audioPath, err := extractAudio(videoPath)
+	audioPath, audioCleanup, err := extractAudio(ffmpegCtx, videoPath)
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(audioPath)
+	defer audioCleanup()
 
-	// Create temp file for output
-	tempDir := os.TempDir()
-	outputBase := filepath.Join(tempDir, "video-journal-transcript")
+	// Create unique temp file prefix for whisper output
+	outputFile, err := os.CreateTemp("", "video-journal-transcript-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp output file: %w", err)
+	}
+	outputBase := outputFile.Name()
+	outputFile.Close()
+	os.Remove(outputBase) // Remove the placeholder, whisper will create files with this prefix
+
+	// Cleanup function for all whisper output files
+	cleanupWhisperOutputs := func() {
+		// Whisper creates files like: outputBase.txt, outputBase.vtt, outputBase.srt, etc.
+		extensions := []string{".txt", ".vtt", ".srt", ".json", ".csv", ".lrc"}
+		for _, ext := range extensions {
+			os.Remove(outputBase + ext)
+		}
+	}
+	defer cleanupWhisperOutputs()
 
 	fmt.Println("Transcribing audio with whisper.cpp...")
 	modelPath := ModelPath(modelSize)
 
+	// Create context with timeout for whisper
+	whisperCtx, whisperCancel := context.WithTimeout(context.Background(), WhisperTimeout)
+	defer whisperCancel()
+
 	// Run whisper.cpp CLI
-	cmd := exec.Command(whisperCLI,
+	cmd := exec.CommandContext(whisperCtx, whisperCLI,
 		"-m", modelPath,
 		"-f", audioPath,
 		"-otxt",
@@ -118,13 +174,14 @@ func TranscribeVideo(videoPath string, modelSize string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if whisperCtx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("whisper transcription timed out after %v", WhisperTimeout)
+		}
 		return "", fmt.Errorf("whisper transcription failed: %w\nOutput: %s", err, string(output))
 	}
 
 	// Read the transcript file
 	transcriptPath := outputBase + ".txt"
-	defer os.Remove(transcriptPath)
-
 	transcript, err := os.ReadFile(transcriptPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read transcript: %w", err)
