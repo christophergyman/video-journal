@@ -1,2 +1,2 @@
-# vide-journal
+# video-journal
 Converts videos to blogposts
