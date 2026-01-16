@@ -1,6 +1,9 @@
 # Binary
 video-journal
 
+# Planning docs
+video-to-blog-pipeline-plan.md
+
 # Go
 *.exe
 *.exe~
