@@ -19,10 +19,10 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: video-journal [flags] <video-path>\n\n")
 		fmt.Fprintf(os.Stderr, "Convert a video file into a blog post using AI.\n\n")
+		fmt.Fprintf(os.Stderr, "Prerequisites:\n")
+		fmt.Fprintf(os.Stderr, "  - claude CLI must be installed and authenticated\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nEnvironment variables:\n")
-		fmt.Fprintf(os.Stderr, "  ANTHROPIC_API_KEY    Required for Claude API access\n")
 		fmt.Fprintf(os.Stderr, "\nExample:\n")
 		fmt.Fprintf(os.Stderr, "  video-journal --model base my-video.mp4\n")
 	}

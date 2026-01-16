@@ -1,23 +1,13 @@
 package blog
 
 import (
-	"context"
 	"fmt"
 	"os"
-
-	"github.com/anthropics/anthropic-sdk-go"
+	"os/exec"
 )
 
-const defaultModel = "claude-sonnet-4-20250514"
-
-// ConvertToBlog converts a transcript into a blog post using Claude
+// ConvertToBlog converts a transcript into a blog post using Claude CLI
 func ConvertToBlog(transcript string, styleGuidePath string) (string, error) {
-	// Check for API key
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is required")
-	}
-
 	// Load style guide
 	styleGuide, err := loadStyleGuide(styleGuidePath)
 	if err != nil {
@@ -27,36 +17,19 @@ func ConvertToBlog(transcript string, styleGuidePath string) (string, error) {
 	// Build the prompt
 	prompt := buildPrompt(transcript, styleGuide)
 
-	// Create Anthropic client
-	client := anthropic.NewClient()
+	fmt.Println("Generating blog post with Claude CLI...")
 
-	fmt.Println("Generating blog post with Claude...")
-
-	// Make API request
-	message, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
-		Model:     anthropic.Model(defaultModel),
-		MaxTokens: 4096,
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-		},
-	})
+	// Execute claude CLI with the prompt
+	cmd := exec.Command("claude", "-p", prompt)
+	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("Claude API error: %w", err)
-	}
-
-	// Extract text from response
-	if len(message.Content) == 0 {
-		return "", fmt.Errorf("empty response from Claude")
-	}
-
-	var result string
-	for _, block := range message.Content {
-		if block.Type == "text" {
-			result += block.Text
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("claude CLI error: %w\nstderr: %s", err, string(exitErr.Stderr))
 		}
+		return "", fmt.Errorf("claude CLI error: %w", err)
 	}
 
-	return result, nil
+	return string(output), nil
 }
 
 func loadStyleGuide(path string) (string, error) {

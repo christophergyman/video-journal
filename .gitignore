@@ -1,0 +1,9 @@
+# Binary
+video-journal
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
